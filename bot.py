@@ -400,9 +400,6 @@ def clear_all_sent_orders() -> None:
 # Selenium
 # -------------------------
 def init_driver():
-    logger.info("CHROME_BIN=%s exists=%s", os.getenv("CHROME_BIN"), os.path.exists(os.getenv("CHROME_BIN","")))
-    logger.info("which chromium=%s", shutil.which("chromium"))
-    logger.info("which google-chrome=%s", shutil.which("google-chrome"))
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--no-sandbox")
@@ -1445,6 +1442,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("Бот запущен. Ожидание команд...")
     bot.infinity_polling()
+
 
 
 
