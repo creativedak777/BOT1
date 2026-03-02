@@ -20,6 +20,7 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import WebDriverException
+from webdriver_manager.chrome import ChromeDriverManager
 
 import telebot
 from telebot import types
@@ -407,24 +408,19 @@ def init_driver():
     chrome_options.add_argument("--window-size=1920,1080")
     chrome_options.add_argument("--lang=ru-RU")
 
-    chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-
-    # если используешь Dockerfile-окружение из прошлого шага
-    chrome_bin = os.getenv("CHROME_BIN")
+    chrome_bin = os.getenv("CHROME_BIN") or os.getenv("GOOGLE_CHROME_BIN")
     if chrome_bin:
         chrome_options.binary_location = chrome_bin
 
+    # если CHROMEDRIVER_PATH задан и файл существует — используем его
     driver_path = os.getenv("CHROMEDRIVER_PATH")
-    if driver_path:
-        from selenium.webdriver.chrome.service import Service
+    if driver_path and os.path.exists(driver_path):
         service = Service(driver_path)
         return webdriver.Chrome(service=service, options=chrome_options)
 
-    return webdriver.Chrome(options=chrome_options)
-
+    # иначе — ставим/подбираем драйвер автоматически
+    service = Service(ChromeDriverManager().install())
+    return webdriver.Chrome(service=service, options=chrome_options)
 
 
 def login(driver):
@@ -1446,6 +1442,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("Бот запущен. Ожидание команд...")
     bot.infinity_polling()
+
 
 
 
