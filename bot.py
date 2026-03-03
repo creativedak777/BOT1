@@ -422,6 +422,53 @@ def init_driver():
     service = Service(ChromeDriverManager().install())
     return webdriver.Chrome(service=service, options=chrome_options)
 
+def is_login_form_present(driver) -> bool:
+    """
+    Возвращает True, если текущая страница похожа на страницу входа.
+    Не смотрим URL, только DOM-элементы.
+    """
+    try:
+        # 1) Любое password-поле — почти наверняка логин
+        if driver.find_elements(By.CSS_SELECTOR, "input[type='password']"):
+            return True
+
+        # 2) Поле логина по placeholder (как на странице "Вход и регистрация для профи")
+        login_inputs = driver.find_elements(
+            By.XPATH,
+            "//input[contains(@placeholder,'Логин') or contains(@placeholder,'телефон') or contains(@placeholder,'Телефон')]"
+        )
+        if login_inputs:
+            return True
+
+        # 3) Старые селекторы (на всякий случай)
+        if driver.find_elements(By.CSS_SELECTOR, ".login-form__input-login"):
+            return True
+
+        return False
+    except Exception:
+        # если driver уже поломался — пусть main_loop поймает WebDriverException
+        return False
+
+def dump_state(driver, tag: str):
+    """
+    Сохраняет скрин и HTML страницы. Полезно для отладки.
+    На Railway файлы останутся в логике контейнера, но можно отправить в TG.
+    """
+    try:
+        ts = int(time.time())
+        png_path = f"/tmp/profi_{tag}_{ts}.png"
+        html_path = f"/tmp/profi_{tag}_{ts}.html"
+        driver.save_screenshot(png_path)
+        with open(html_path, "w", encoding="utf-8") as f:
+            f.write(driver.page_source)
+
+        logger.info("DEBUG dump saved: %s, %s", png_path, html_path)
+
+        # Если хочешь получать это в Telegram, раскомментируй:
+        # with open(png_path, "rb") as f:
+        #     bot.send_photo(TG_CHAT_ID, f, caption=f"DEBUG: {tag}")
+    except Exception:
+        logger.exception("Не удалось сохранить debug-дамп страницы")
 
 def login(driver):
     """Авторизация на Profi.ru с учетом перехода через страницу регистрации"""
@@ -990,7 +1037,7 @@ def main_loop():
         )
         is_running = False
         return
-
+    empty_streak = 0
     while is_running:
         # Проверка расписания
         if not is_within_work_hours():
@@ -1013,11 +1060,51 @@ def main_loop():
 
             if not containers:
                 logger.info("Заказы не найдены")
+
+                # --- НОВОЕ: проверяем, не разлогинило ли нас ---
+                # Счётчик пустых проходов держим локально в main_loop
+                empty_streak += 1
+                logger.info("empty_streak=%s", empty_streak)
+
+                # Если два раза подряд нет карточек и мы видим форму логина — перелогиниваемся
+                if empty_streak >= 2 and is_login_form_present(driver):
+                    logger.warning("Похоже, сессия слетела (найдена форма логина). Перезапускаю драйвер...")
+                    try:
+                        bot.send_message(TG_CHAT_ID, "⚠️ Похоже, Profi разлогинил сессию. Пробую перелогиниться…")
+                    except Exception:
+                        logger.exception("Не удалось отправить уведомление в TG")
+
+                    # dump_state(driver, "login_detected")  # если хочешь debug
+
+                    if not restart_driver():
+                        logger.error("Не удалось перелогиниться — останавливаю мониторинг")
+                        is_running = False
+                        break
+
+                    empty_streak = 0
+                    time.sleep(10)
+                    continue
+
+                # Если долго подряд нет карточек, но форма логина не найдена —
+                # возможно капча/блок/изменение верстки. Дадим тебе сигнал.
+                if empty_streak >= 10:
+                    logger.warning("10 циклов подряд без заказов. Возможна капча/блок/изменение верстки.")
+                    # dump_state(driver, "no_orders_10x")  # опционально
+                    try:
+                        bot.send_message(
+                            TG_CHAT_ID,
+                            "⚠️ 10 циклов подряд без карточек заказов. Возможно капча/блокировка/изменение верстки."
+                        )
+                    except Exception:
+                        logger.exception("Не удалось отправить уведомление в TG")
+                    empty_streak = 0  # чтобы не спамить
+
                 time.sleep(random.randint(PAGE_REFRESH_MIN, PAGE_REFRESH_MAX))
                 continue
 
             max_age = get_max_age_seconds()
-
+            if containers:
+                empty_streak = 0
             # Обработка заказов
             for container in containers:
                 if not is_running:
@@ -1442,6 +1529,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("Бот запущен. Ожидание команд...")
     bot.infinity_polling()
+
 
 
 
