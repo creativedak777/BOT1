@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 from html import escape
 import psycopg
 from urllib.parse import urlparse
-
+import json
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -58,10 +58,18 @@ DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 SENT_RETENTION_DAYS = int(os.getenv("SENT_RETENTION_DAYS", "1"))  # сколько дней хранить ID заказов
 
 
-# LLM (DeepSeek через openai SDK)
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.deepseek.com")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+# LLM (OpenRouter через OpenAI SDK)
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+
+# OpenRouter OpenAI-compatible endpoint
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
+
+# (опционально) атрибуция приложения в OpenRouter
+OPENROUTER_SITE_URL = os.getenv("OPENROUTER_SITE_URL", "").strip()
+OPENROUTER_APP_NAME = os.getenv("OPENROUTER_APP_NAME", "Profi Tutor Bot").strip()
+
+# модель по умолчанию
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "x-ai/grok-4.1-fast").strip()
 
 WORK_START = os.getenv("WORK_START", "07:30")
 WORK_END = os.getenv("WORK_END", "22:30")
@@ -127,8 +135,7 @@ def get_llm_model() -> str:
     m = (get_setting("llm_model") or "").strip()
     if m:
         return m
-    env_m = (os.getenv("DEEPSEEK_MODEL") or "").strip()
-    return env_m or "deepseek-chat"
+    return OPENROUTER_MODEL or "x-ai/grok-4.1-fast"
 
 
 # -------------------------
@@ -183,7 +190,7 @@ def init_db():
 
             # модель LLM
             con.execute("""
-                INSERT INTO settings(key, value) VALUES ('llm_model', 'deepseek-chat')
+                INSERT INTO settings(key, value) VALUES ('llm_model', 'x-ai/grok-4.1-fast')
                 ON CONFLICT (key) DO NOTHING
             """)
             con.commit()
@@ -216,7 +223,7 @@ def init_db():
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('work_end', '22:30')")
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('bot_timezone', 'Europe/Moscow')")
             con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('max_age_minutes', '0')")
-            con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('llm_model', 'deepseek-chat')")
+            con.execute("INSERT OR IGNORE INTO settings(key, value) VALUES ('llm_model', 'x-ai/grok-4.1-fast')")
             
             con.commit()
 
@@ -842,10 +849,22 @@ def parse_order(container):
 # LLM
 # -------------------------
 def get_llm_client():
-    if not OPENAI_API_KEY:
+    if not OPENROUTER_API_KEY:
         return None
-    return OpenAI(api_key=OPENAI_API_KEY, base_url=OPENAI_BASE_URL)
 
+    headers = {}
+    # Эти заголовки опциональны, но рекомендованы OpenRouter для атрибуции приложения
+    # (Если OPENROUTER_SITE_URL пустой — просто не отправляем HTTP-Referer)
+    if OPENROUTER_SITE_URL:
+        headers["HTTP-Referer"] = OPENROUTER_SITE_URL
+    if OPENROUTER_APP_NAME:
+        headers["X-OpenRouter-Title"] = OPENROUTER_APP_NAME
+
+    return OpenAI(
+        api_key=OPENROUTER_API_KEY,
+        base_url=OPENROUTER_BASE_URL,
+        default_headers=headers if headers else None,
+    )
 
 def default_user_prompt_template() -> str:
     return (
@@ -864,25 +883,9 @@ def default_user_prompt_template() -> str:
 
 
 def build_user_prompt(order: dict) -> str:
-    tpl = get_setting("user_prompt") or ""
-
-    # если шаблон пустой — используем базовый дефолт
-    if not tpl.strip():
-        tpl = default_user_prompt_template()
-
-    # безопасная подстановка
-    data = {
-        "subject": order.get("subject", ""),
-        "description": order.get("description", ""),
-        "price": order.get("price", ""),
-        "time_info": order.get("time_info", ""),
-    }
-
-    try:
-        return tpl.format(**data)
-    except Exception:
-        # если пользователь случайно сломал форматирование
-        return default_user_prompt_template().format(**data)
+    # Передаём order целиком (как:contentReference[oaicite:16]{index=16}уемом формате
+    order_json = json.dumps(order, ensure_ascii=False)
+    return "Сгенерируй одно сообщение-отклик по правилам system.\n\norder = " + order_json
 
 def build_system_prompt() -> str:
     """
@@ -1339,35 +1342,25 @@ def schedule_set_command(message):
 @bot.message_handler(commands=['model_show'])
 def model_show_command(message):
     m = get_llm_model()
-    bot.send_message(message.chat.id, f"Текущая модель LLM: {m}\n"
-                                      f"Доступно: deepseek-chat, deepseek-reasoner")
+    bot.send_message(
+        message.chat.id,
+        f"Текущая модель LLM: {m}\n"
+        f"Пример для OpenRouter: x-ai/grok-4.1-fast"
+    )
 
 @bot.message_handler(commands=['model_set'])
 def model_set_command(message):
-    # формат: /model_set chat  или /model_set reasoner
-    text = (message.text or "").strip()
+    # формат: /model_set x-ai/grok-4.1-f:contentReference[oaicite:20]{index=20}ge.text or "").strip()
     parts = text.split(maxsplit=1)
 
-    if len(parts) != 2:
-        bot.send_message(message.chat.id, "Использование: /model_set chat|reasoner")
+    if len(parts) != 2 or not parts[1].strip():
+        bot.send_message(message.chat.id, "Использование: /model_set <model_id>\nНапример: /model_set x-ai/grok-4.1-fast")
         return
 
-    val = parts[1].strip().lower()
-
-    mapping = {
-        "chat": "deepseek-chat",
-        "reasoner": "deepseek-reasoner",
-        "deepseek-chat": "deepseek-chat",
-        "deepseek-reasoner": "deepseek-reasoner",
-    }
-
-    if val not in mapping:
-        bot.send_message(message.chat.id, "Неизвестная модель. Используй chat или reasoner.")
-        return
-
-    model = mapping[val]
+    model = parts[1].strip()
     set_setting("llm_model", model)
     bot.send_message(message.chat.id, f"Модель обновлена: {model}")
+
 
 @bot.message_handler(commands=['age_show'])
 def age_show_command(message):
@@ -1529,6 +1522,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("Бот запущен. Ожидание команд...")
     bot.infinity_polling()
+
 
 
 
