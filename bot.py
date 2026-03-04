@@ -131,13 +131,19 @@ def is_within_work_hours() -> bool:
     return start_t <= now.time() <= end_t
 
 def get_llm_model() -> str:
-    # приоритет: БД -> ENV -> дефолт
+    """
+    Возвращает model_id для OpenRouter.
+    Если в БД остались старые значения (deepseek-chat / deepseek-reasoner),
+    автоматически используем дефолт OpenRouter_MODEL.
+    """
     m = (get_setting("llm_model") or "").strip()
     if m:
+        legacy = {"deepseek-chat", "deepseek-reasoner", "chat", "reasoner"}
+        if m.lower() in legacy:
+            return OPENROUTER_MODEL or "x-ai/grok-4.1-fast"
         return m
+
     return OPENROUTER_MODEL or "x-ai/grok-4.1-fast"
-
-
 # -------------------------
 # DB helpers
 # -------------------------
@@ -1522,6 +1528,7 @@ if __name__ == "__main__":
     init_db()
     logger.info("Бот запущен. Ожидание команд...")
     bot.infinity_polling()
+
 
 
 
